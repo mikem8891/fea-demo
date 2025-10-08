@@ -105,14 +105,8 @@ impl Lin2DStaticModel {
     pub fn set_to_output(&self) {
         let nodes = self.nodes.borrow();
         // TODO: write elements to the output
-        for (element_index, &element) in self.elements.iter().enumerate() {
-            VERTICES.with_borrow_mut(|v| {
-                v[3*element_index  ] = nodes[node_index].position[0] as f32;
-                v[3*element_index+1] = nodes[node_index].position[1] as f32;
-            });
             // TODO: write displacements, stresses, and forces to the output
-
-        }
+        todo!();
     }
 }
 
