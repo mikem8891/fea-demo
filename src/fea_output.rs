@@ -1,40 +1,50 @@
-use std::cell::RefCell;
-
+#![allow(static_mut_refs)]
 use wasm_bindgen::prelude::*;
 
-// v - e + f = 1
+const FACES: usize = 32;
 
-// each new triangular element needs
-// 1) 1 vert and 2 edges, or
-// 2) 1 edge 
+/// Vertices for the WebGL canvas
+pub static mut VERTICES: [f32; 3 * 2 * FACES] = [0.0; 3 * 2 * FACES];
+pub static mut DISPLACEMENTS: [f32; 3 * 2 * FACES] = [0.0; 3 * 2 * FACES];
+pub static mut STRESSES: [f32; 3 * 3 * FACES] = [0.0; 3 * 3 * FACES];
+pub static mut FORCES: [f32; 3 * 2 * FACES] = [0.0; 3 * 2 * FACES];
 
-// f = - v + e - 1
-
-pub const FACES: usize = 32;
-
-thread_local! {
-    pub static VERTICES: RefCell<[f32; 3 * 2 * FACES]> = RefCell::new([0.0; 3 * 2 * FACES]);
-    pub static DISPLACEMENTS: RefCell<[f32; 3 * 2 * FACES]> = RefCell::new([0.0; 3 * 2 * FACES]);
-    pub static STRESSES: RefCell<[f32; 3 * 3 * FACES]> = RefCell::new([0.0; 3 * 3 * FACES]);
-    pub static FORCES: RefCell<[f32; 3 * 2 * FACES]> = RefCell::new([0.0; 3 * 2 * FACES]);
+#[wasm_bindgen]
+pub fn max_faces() -> usize {
+    FACES
 }
 
 #[wasm_bindgen]
 pub fn get_vertices() -> *const f32 {
-    VERTICES.with_borrow(|v| v.as_ptr())
+    unsafe { VERTICES.as_ptr() }
+}
+
+#[wasm_bindgen]
+pub fn get_vertices_len() -> usize {
+    unsafe { VERTICES.len() }
 }
 
 #[wasm_bindgen]
 pub fn get_displacements() -> *const f32 {
-    DISPLACEMENTS.with_borrow(|d| d.as_ptr())
+    unsafe { DISPLACEMENTS.as_ptr() }
+}
+
+#[wasm_bindgen]
+pub fn get_displacements_len() -> usize {
+    unsafe { DISPLACEMENTS.len() }
 }
 
 #[wasm_bindgen]
 pub fn get_stresses() -> *const f32 {
-    STRESSES.with_borrow(|s| s.as_ptr())
+    unsafe { STRESSES.as_ptr() }
+}
+
+#[wasm_bindgen]
+pub fn get_stresses_len() -> usize {
+    unsafe { STRESSES.len() }
 }
 
 #[wasm_bindgen]
 pub fn get_forces() -> *const f32 {
-    FORCES.with_borrow(|f| f.as_ptr())
+    unsafe { FORCES.as_ptr() }
 }

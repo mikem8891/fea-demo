@@ -1,8 +1,8 @@
 use std::fmt::Display;
 use std::ops::{Index, IndexMut};
 
-use crate::math::stack;
-use crate::math::heap::Vector;
+use crate::stack;
+use crate::heap::Vector;
 
 #[derive(Debug, Clone)]
 pub struct Matrix {

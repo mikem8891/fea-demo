@@ -1,7 +1,7 @@
 #![no_main]
 #[macro_use]
 mod utils;
-pub mod math;
+use math;
 pub mod fea;
 pub mod fea_output;
 
@@ -11,6 +11,14 @@ pub use fea::Lin2DStaticModel;
 #[wasm_bindgen]
 pub fn main() {
     fea::test::square();
+    unsafe {
+        fea_output::VERTICES[0] = 0.0;
+        fea_output::VERTICES[1] = 0.0;
+        fea_output::VERTICES[2] = 1.0;
+        fea_output::VERTICES[3] = 0.0;
+        fea_output::VERTICES[4] = 0.0;
+        fea_output::VERTICES[5] = 1.0;
+   }
 }
 
 #[wasm_bindgen]

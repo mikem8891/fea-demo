@@ -1,33 +1,60 @@
 //@ts-check
 "use strict";
 
-import initWasm, {Lin2DStaticModel, Node2D, KnownType, init_fea, FeaError} from "./pkg/learn_fea.js";
+import initWasm, {Lin2DStaticModel, Node2D, KnownType, init_fea} from "./pkg/learn_fea.js";
 
 import * as doc from "./modules/doc.js";
+import * as load from "./modules/load.js";
 
 const wasm = await initWasm();
 
 /** @type {Lin2DStaticModel} */
 let model;
 
-function setup() {
+async function setup() {
   
+  console.log("running wasm");
   wasm.main();
+  console.log("finished wasm");
 
+  console.log("setting up canvas");
+  const canvasPromise = setupCanvas();
+
+  console.log("setting up inputs");
+  setupFileManagement()
   setupMaterialInputs();
   setupNodeInputs();
   setupElementInputs();
 
+  console.log("setting up FEA");
   const stepBtn = doc.getElementById("step-button");
   const errorDiv = doc.getElementById("errors");
+
+  const {buffer, context: gl} = await canvasPromise.catch((err) => {
+    errorDiv.innerText = err.message;
+    errorDiv.hidden = false;
+    throw err;
+  });
     
-  stepBtn.addEventListener("click", (evt) => {
+  stepBtn.addEventListener("click", (_evt) => {
     errorDiv.innerText = "";
     try {
-      model.check();
       model.step();
       doc.getInputElementById("node-index").dispatchEvent(new Event("change"));
       errorDiv.hidden = true;
+
+      model.set_to_output();
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.object.vertex);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, buffer.data.vertex);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.object.displacement);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, buffer.data.displacement);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.object.stress);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, buffer.data.stress);
+
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 3 * model.elements_len());
+
     } catch (error) {
       if (error instanceof Error) {
         errorDiv.innerText = error.message;
@@ -37,13 +64,10 @@ function setup() {
       errorDiv.hidden = false;
     }
   });
-  /// TODO: 
-  /// /. add elements
-  /// /. step results
-  /// /. delete nodes and elements
-  /// 4. graphical output
-  /// /. add error messages
-  /// 6. save and load files
+
+  doc.getElementById("new").dispatchEvent(new Event("click"));
+
+  console.log("setup complete!");
 }
 
 function setupMaterialInputs() {
@@ -55,14 +79,16 @@ function setupMaterialInputs() {
   poissonsRatio.addEventListener("change", changeMaterials);
   rigidity.addEventListener("change", changeMaterials);
   
+  
+  /**
+   * @param {Event=} _evt
+   */
   function changeMaterials(_evt) {
     const e = parseFloat(elasticity.value);
     const nu = parseFloat(poissonsRatio.value);
     const g = parseFloat(rigidity.value);
-    model = init_fea(e, nu, g);
+    model.set_elasticity(e, nu, g);
   }
-
-  changeMaterials();
 }
 
 function setupNodeInputs() {
@@ -102,7 +128,10 @@ function setupNodeInputs() {
     changeNodeIndex(evt);
   });
 
-  function changeNodeIndex(evt) {
+  /**
+   * @param {Event} _evt 
+   */
+  function changeNodeIndex(_evt) {
     let index = parseInt(nodeIndex.value);
     if (model.nodes_len() <= 0 || isNaN(index)) {
       nodeIndex.value = "";
@@ -160,7 +189,10 @@ function setupNodeInputs() {
 
   nodeIndex.addEventListener("change", changeNodeIndex);
 
-  function changeNodeProp(evt) {
+  /**
+   * @param {Event} _evt 
+   */
+  function changeNodeProp(_evt) {
     const index = parseInt(nodeIndex.value);
     if (model.nodes_len() <= 0 || isNaN(index)) {
       nodeIndex.value = "";
@@ -178,7 +210,7 @@ function setupNodeInputs() {
       node.knownY = KnownType.Force;
     } else {
       node.knownY = KnownType.Displacement;
-    } 
+    }
 
     node.posX = parseFloat(positionX.value);
     node.posY = parseFloat(positionY.value);
@@ -270,6 +302,9 @@ function setupElementInputs() {
 
   elementIndex.addEventListener("change", changeElementIndex);
 
+  /**
+   * @param {Event} _evt 
+   */
   function changeElementIndices(_evt) {
     const index = parseInt(elementIndex.value);
     const indices = new Uint32Array(3);
@@ -286,8 +321,331 @@ function setupElementInputs() {
   elementNodes[2].addEventListener("change", changeElementIndices);
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', setup);
+async function setupCanvas() {
+  
+  const canvasId = "canvas";
+  const canvas = /** @type {HTMLCanvasElement} */(doc.getElementById(canvasId));
+
+  /**
+   * @param {string} message
+   */
+  function error(message) {
+    alert(message);
+    throw new Error(message);
+  }
+
+  if (canvas.tagName.toLowerCase() != "canvas") {
+    throw new Error(`Element id = "${canvasId}" is a "${canvas.tagName}" instead of a canvas element`);
+  }
+  const gl = /** @type {WebGLRenderingContext?} */(canvas.getContext("webgl2"));
+  if (gl === null) {
+    error("WebGL2 is not supported");
+    throw null;
+  }
+
+  // Get shader source code from files
+  const displacementVertexShaderSource = load.text("shaders/displacement.vs.glsl");
+  const stressFragmentShaderSource = load.text("shaders/stress.fs.glsl");
+
+  // Clear the canvas
+  gl.clearColor(0.05, 0.10, 0.05, 1.00);
+//  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  // Create blank shaders objects
+  const displacementVertexShader = gl.createShader(gl.VERTEX_SHADER);
+  const stressFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+  if (displacementVertexShader === null || stressFragmentShader === null) {
+    error("Failed to crate a shader");
+    throw null;
+  }
+
+  // Set shader source code
+  gl.shaderSource(displacementVertexShader, await displacementVertexShaderSource);
+  gl.shaderSource(stressFragmentShader, await stressFragmentShaderSource);
+
+  // Compiler shader source code
+  gl.compileShader(displacementVertexShader);
+  gl.compileShader(stressFragmentShader);
+
+  // Check for compilation errors
+  if (!gl.getShaderParameter(displacementVertexShader, gl.COMPILE_STATUS)){
+    error(`ERROR compiling displacement vertex shader!\n${gl.getShaderInfoLog(displacementVertexShader)}`);
+    throw null;
+  }
+  if (!gl.getShaderParameter(stressFragmentShader, gl.COMPILE_STATUS)){
+    error(`ERROR compiling stress fragment shader!\n${gl.getShaderInfoLog(stressFragmentShader)}`);
+    throw null;
+  }
+
+  // Create and link the program to run the shaders
+  var stressProgram = gl.createProgram();
+  gl.attachShader(stressProgram, displacementVertexShader);
+  gl.attachShader(stressProgram, stressFragmentShader);
+  gl.linkProgram(stressProgram);
+
+  // Check for linking and validation errors
+  if (!gl.getProgramParameter(stressProgram, gl.LINK_STATUS)){
+    error(`ERROR linking program\n${gl.getProgramInfoLog(stressProgram)}`);
+    throw null;
+  }
+  gl.validateProgram(stressProgram);
+  if (!gl.getProgramParameter(stressProgram, gl.VALIDATE_STATUS)){
+    alert(`ERROR validating program\n${gl.getProgramInfoLog(stressProgram)}`);
+    throw null;
+  }
+
+  const maxFaces = wasm.max_faces();
+  const vertices = 
+    new Float32Array(
+      wasm.memory.buffer, 
+      wasm.get_vertices(), 
+      3 * 2 * maxFaces
+    );
+  const displacements = 
+    new Float32Array(
+      wasm.memory.buffer, 
+      wasm.get_displacements(), 
+      3 * 2 * maxFaces
+    );
+  const stresses = 
+    new Float32Array(
+      wasm.memory.buffer, 
+      wasm.get_stresses(), 
+      3 * 3 * maxFaces
+    );
+  
+  // Create buffers
+  // vertex position buffer
+  const vertexBufferObject = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBufferObject);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
+  const positionAttribLocation = gl.getAttribLocation(stressProgram, "vertPosition"); 
+  gl.vertexAttribPointer(
+    positionAttribLocation, // Attribute location 
+    2,                      // Number of elements per attribute (X, Y)
+    gl.FLOAT,               // Data type of the elements
+    false,                  // Whether the elements are normalized
+    2 * Float32Array.BYTES_PER_ELEMENT, // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+  // vertex displacement buffer
+  const displacementBufferObject = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, displacementBufferObject);
+  gl.bufferData(gl.ARRAY_BUFFER, displacements, gl.DYNAMIC_DRAW);
+  const displacementAttribLocation = gl.getAttribLocation(stressProgram, "vertDisp");
+  gl.vertexAttribPointer(
+    displacementAttribLocation, // Attribute location 
+    2,                       // Number of elements per attribute (X, Y)
+    gl.FLOAT,                // Data type of the elements
+    false,                   // Whether the elements are normalized
+    2 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+  // vertex stress buffer
+  const stressBufferObject = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, stressBufferObject);
+  gl.bufferData(gl.ARRAY_BUFFER, stresses, gl.DYNAMIC_DRAW);
+  const stressAttribLocation = gl.getAttribLocation(stressProgram, "vertStress");
+  gl.vertexAttribPointer(
+    stressAttribLocation, // Attribute location 
+    3,                    // Number of elements per attribute (σ_x, σ_y, τ_xy)
+    gl.FLOAT,             // Data type of the elements
+    false,                // Whether the elements are normalized
+    3 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+
+  gl.enableVertexAttribArray(displacementAttribLocation); // Enables the attribute
+  gl.enableVertexAttribArray(positionAttribLocation); // Enables the attribute
+  gl.enableVertexAttribArray(stressAttribLocation); // Enables the attribute
+
+  gl.useProgram(stressProgram);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const canvasHooks = {
+    buffer: {
+      object: {
+        vertex: vertexBufferObject, 
+        displacement: displacementBufferObject, 
+        stress: stressBufferObject
+      },
+      data: {
+        vertex: vertices,
+        displacement: displacements,
+        stress: stresses,
+      }
+    },
+    canvas,
+    context: gl,
+    programs: {stress: stressProgram},
+  }
+
+  return canvasHooks;
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setup);
 } else {
   setup();
+}
+
+function setupFileManagement() {
+
+  const newBtn = doc.getElementById("new");
+  const open = doc.getElementById("open");
+  const save = doc.getElementById("save");
+
+  const elasticity = doc.getInputElementById("elasticity");
+  const poissonsRatio = doc.getInputElementById("poissons-ratio");
+  const rigidity = doc.getInputElementById("rigidity");
+  const nodeIndex = doc.getElementById("node-index");
+  const elementIndex = doc.getElementById("element-index");
+  
+  newBtn.addEventListener("click", (_evt) => {
+
+    const e = parseFloat(elasticity.value);
+    const nu = parseFloat(poissonsRatio.value);
+    const g = parseFloat(rigidity.value);
+    model = init_fea(e, nu, g);
+
+    nodeIndex.dispatchEvent(new Event("change"));
+    elementIndex.dispatchEvent(new Event("change"));
+  });
+
+  open.addEventListener("click", (_evt) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.setAttribute("accept", ".json,text/json");
+    input.addEventListener("change", async (_evt) => {
+      if (input.files === null) {
+        const message = "File missing!";
+        alert(message);
+        throw new Error(message);
+      }
+      const file = input.files[0];
+      const modelJson = JSON.parse(await file.text());
+      if (modelJson.elasticity) {
+        doc.getInputElementById("elasticity").value = modelJson.elasticity;
+      } else {
+        const message = "File is missing elasticity";
+        alert(message);
+        throw new Error(message)
+      }
+      if (modelJson.poissonsRatio) {
+        doc.getInputElementById("poissons-ratio").value = modelJson.poissonsRatio;
+      } else {
+        const message = "File is missing poissonsRatio";
+        alert(message);
+        throw new Error(message)
+      }
+      if (modelJson.rigidity) {
+        doc.getInputElementById("rigidity").value = modelJson.rigidity;
+      } else {
+        const message = "File is missing rigidity";
+        alert(message);
+        throw new Error(message)
+      }
+      doc.getInputElementById("rigidity").dispatchEvent(new Event("change"));
+      if (modelJson.nodes) {
+        const nodeCount = modelJson.nodes.length;
+        for (let i = 0; i < nodeCount; i++) {
+          const nodeJson = modelJson.nodes[i];
+          model.add_node();
+          const node = model.get_node(i);
+          node.posX = nodeJson.position.x;
+          node.posY = nodeJson.position.y;
+          node.knownX = 
+            (nodeJson.known.x == "displacement")?KnownType.Displacement:KnownType.Force;
+          node.knownY = 
+            (nodeJson.known.y == "displacement")?KnownType.Displacement:KnownType.Force;
+          node.dispX = nodeJson.displacement.x;
+          node.dispY = nodeJson.displacement.y;
+          node.forceX = nodeJson.force.x;
+          node.forceY = nodeJson.force.y;
+          model.set_node(i, node);
+        }
+      } else {
+        const message = "File is missing nodes";
+        alert(message);
+        throw new Error(message)
+      }
+      if (modelJson.elements) {
+        const elementCount = modelJson.elements.length;
+        for (let i = 0; i < elementCount; i++) {
+          const elementJson = modelJson.elements[i];
+          model.add_elem();
+          model.set_element_indices(i, elementJson.indices);
+        }
+      } else {
+        const message = "File is missing elements";
+        alert(message);
+        throw new Error(message)
+      }
+    });
+    input.click();
+  });
+
+  save.addEventListener("click", (_evt) => {
+    const elasticity = doc.getInputElementById("elasticity").value;
+    const poissonsRatio = doc.getInputElementById("poissons-ratio").value;
+    const rigidity = doc.getInputElementById("rigidity").value;
+    /** @type {any[]} */
+    const nodes = [];
+    /** @type {any[]} */
+    const elements = [];
+    const modelJson = {
+      elasticity,
+      poissonsRatio,
+      rigidity,
+      nodes,
+      elements,
+    };
+    const nodeCount = model.nodes_len();
+    for (let i = 0; i < nodeCount; i++) {
+      const node = model.get_node(i);
+      const position = {
+        x: node.posX,
+        y: node.posY,
+      };
+      const known = {
+        x: (node.knownX == KnownType.Displacement)?"displacement":"force",
+        y: (node.knownY == KnownType.Displacement)?"displacement":"force",
+      }
+      const displacement = {
+        x: node.dispX,
+        y: node.dispY,
+      };
+      const force = {
+        x: node.forceX,
+        y: node.forceY,
+      };
+      const nodeJson = {
+        position,
+        known,
+        displacement,
+        force,
+      };
+      modelJson.nodes.push(nodeJson);
+    }
+    const elementCount = model.elements_len();
+    for (let i = 0; i < elementCount; i++) {
+      const elementIndices = model.get_element_indices(i);
+      const elementJson = {
+        indices: [elementIndices[0], elementIndices[1], elementIndices[2]],
+      };
+      modelJson.elements.push(elementJson);
+    }
+
+    const file = new Blob([JSON.stringify(modelJson, null, 2)], {type: "text/json"});
+
+    const downloadLink = document.createElement('a');
+    downloadLink.href = URL.createObjectURL(file);
+    downloadLink.download = "Lin2dFea.json";
+    
+    document.body.appendChild(downloadLink); 
+    downloadLink.click();
+    downloadLink.remove();
+  });
 }

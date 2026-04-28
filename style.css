@@ -50,6 +50,9 @@ la-tex {
 :root {
   --sidebar-width: 300px;
 }
+cavas {
+  background-color: #f88;
+}
 div.main {
   height: 100dvh;
   width:  100vw;
