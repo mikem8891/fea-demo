@@ -17,44 +17,37 @@ async function setup() {
   wasm.main();
   console.log("finished wasm");
 
+  setupMaterialInputs();
+
   console.log("setting up canvas");
   const canvasPromise = setupCanvas();
 
-  console.log("setting up inputs");
-  setupFileManagement()
-  setupMaterialInputs();
-  setupNodeInputs();
-  setupElementInputs();
-
   console.log("setting up FEA");
   const stepBtn = doc.getElementById("step-button");
+  const playBtn = doc.getElementById("play-button");
+  const stopBtn = doc.getElementById("stop-button");
   const errorDiv = doc.getElementById("errors");
 
-  const {buffer, context: gl} = await canvasPromise.catch((err) => {
+  const {renderAll, renderNodes} = await canvasPromise.catch((err) => {
     errorDiv.innerText = err.message;
     errorDiv.hidden = false;
     throw err;
   });
-    
-  stepBtn.addEventListener("click", (_evt) => {
+
+  console.log("setting up inputs");
+  setupFileManagement(renderAll)
+  setupNodeInputs(renderNodes);
+  setupElementInputs(renderAll);
+
+  const renderStep = () => {
     errorDiv.innerText = "";
     try {
-      model.step();
+      for (let i = 0; i < 10; i++) {
+        model.step();
+      }
       doc.getInputElementById("node-index").dispatchEvent(new Event("change"));
       errorDiv.hidden = true;
-
-      model.set_to_output();
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.object.vertex);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, buffer.data.vertex);
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.object.displacement);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, buffer.data.displacement);
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer.object.stress);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, buffer.data.stress);
-
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      gl.drawArrays(gl.TRIANGLES, 0, 3 * model.elements_len());
-
+      renderAll();
     } catch (error) {
       if (error instanceof Error) {
         errorDiv.innerText = error.message;
@@ -62,6 +55,32 @@ async function setup() {
         errorDiv.innerText = "unknown error";
       }
       errorDiv.hidden = false;
+    }
+  };
+    
+  stepBtn.addEventListener("click", () => {
+    if (animation.id) {
+      cancelAnimationFrame(animation.id);
+      animation.id = null;
+    }
+    renderStep();
+  });
+
+  /** @type {{id: number?}} */
+  const animation = {id: null};
+
+  playBtn.addEventListener("click", (_) => {
+    const loop = () => {
+      renderStep();
+      animation.id = requestAnimationFrame(loop);
+    };
+    loop();
+  });
+
+  stopBtn.addEventListener("click", (_) => {
+    if (animation.id) {
+      cancelAnimationFrame(animation.id);
+      animation.id = null;
     }
   });
 
@@ -91,7 +110,10 @@ function setupMaterialInputs() {
   }
 }
 
-function setupNodeInputs() {
+/**
+ * @param {() => void} renderNodes
+ */
+function setupNodeInputs(renderNodes) {
   const addNodeBtn = doc.getElementById("add-node");
   const deleteNodeBtn = doc.getElementById("delete-node");
   const nodeIndex = doc.getInputElementById("node-index");
@@ -119,6 +141,8 @@ function setupNodeInputs() {
     model.add_node();
     changeNodeIndex(evt);
     positionX.select();
+    model.set_all_nodes();
+    renderNodes();
   });
 
   deleteNodeBtn.addEventListener("click", (evt) => {
@@ -126,6 +150,7 @@ function setupNodeInputs() {
   
     model.delete_node(index);
     changeNodeIndex(evt);
+    renderNodes();
   });
 
   /**
@@ -222,6 +247,7 @@ function setupNodeInputs() {
     model.set_node(index, node);
     
     setNodeInputsTo(node);
+    renderNodes();
   }
 
   known.force.x.addEventListener("click", changeNodeProp);
@@ -236,7 +262,10 @@ function setupNodeInputs() {
   forceY.addEventListener("change", changeNodeProp);
 }
 
-function setupElementInputs() {
+/**
+ * @param {() => void} renderAll
+ */
+function setupElementInputs(renderAll) {
   const addElementBtn = doc.getElementById("add-element");
   const deleteElementBtn = doc.getElementById("delete-element");
   const elementIndex = doc.getInputElementById("element-index");
@@ -261,6 +290,7 @@ function setupElementInputs() {
     elementNodes[0].value = indices[0].toString();
     elementNodes[1].value = indices[1].toString();
     elementNodes[2].value = indices[2].toString();
+    renderAll();
   });
 
   deleteElementBtn.addEventListener("click", () => {
@@ -274,6 +304,7 @@ function setupElementInputs() {
     changeElementIndex();
     const nodeIndex = doc.getInputElementById("node-index");
     nodeIndex.dispatchEvent(new Event("change"));
+    renderAll();
   });
 
   function changeElementIndex() {
@@ -314,6 +345,7 @@ function setupElementInputs() {
     }
 
     model.set_element_indices(index, indices);
+    renderAll();
   }
 
   elementNodes[0].addEventListener("change", changeElementIndices);
@@ -343,145 +375,134 @@ async function setupCanvas() {
     throw null;
   }
 
-  // Get shader source code from files
-  const displacementVertexShaderSource = load.text("shaders/displacement.vs.glsl");
-  const stressFragmentShaderSource = load.text("shaders/stress.fs.glsl");
-
   // Clear the canvas
-  gl.clearColor(0.05, 0.10, 0.05, 1.00);
-//  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.0, 0.0, 0.0, 1.0);
+  gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // Create blank shaders objects
-  const displacementVertexShader = gl.createShader(gl.VERTEX_SHADER);
-  const stressFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
-  if (displacementVertexShader === null || stressFragmentShader === null) {
-    error("Failed to crate a shader");
-    throw null;
+  const uniforms = {
+    maxStress: 30,
+    scaleDisp: 50,
+    view: {
+      center: [0.5, 0.5],
+      range: [2.0, 2.0],
+    }
+  }
+  uniforms.view.range[0] = uniforms.view.range[1] * canvas.clientWidth / canvas.clientHeight;
+
+  const nodes = await setupNodeProgram(gl);
+  gl.useProgram(nodes.program);
+  gl.uniform1f(nodes.scaleDisp.location, uniforms.scaleDisp);
+
+
+  const elements = await setupElementProgram(gl);
+  gl.useProgram(elements.program);
+  gl.uniform1f(elements.scaleDisp.location, uniforms.scaleDisp);
+  gl.uniform1f(elements.maxStress.location, uniforms.maxStress);
+
+  const renderNodes = () => {
+    model.set_all_nodes();
+
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    gl.useProgram(nodes.program);
+    
+    gl.enableVertexAttribArray(nodes.position.location); // Enables the attribute
+    gl.enableVertexAttribArray(nodes.displacement.location); // Enables the attribute
+    
+    gl.uniform2fv(nodes.view.center.location, uniforms.view.center);
+    gl.uniform2fv(nodes.view.range.location, uniforms.view.range);
+    gl.uniform1f(nodes.scaleDisp.location, uniforms.scaleDisp);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, nodes.position.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, nodes.position.data);
+    gl.bindBuffer(gl.ARRAY_BUFFER, nodes.displacement.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, nodes.displacement.data);
+    
+    gl.drawArrays(gl.POINTS, 0, wasm.get_nodes_len()) // nodes
+    
+    gl.disableVertexAttribArray(nodes.position.location); // Disable the attribute
+    gl.disableVertexAttribArray(nodes.displacement.location); // Disable the attribute
+  };
+
+  const renderAll = () => {
+    model.set_all_outputs();
+
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    
+    gl.useProgram(elements.program);
+    
+    gl.enableVertexAttribArray(elements.displacement.location); // Enables the attribute
+    gl.enableVertexAttribArray(elements.position.location); // Enables the attribute
+    gl.enableVertexAttribArray(elements.stress.location); // Enables the attribute
+    
+    gl.uniform2fv(elements.view.center.location, uniforms.view.center);
+    gl.uniform2fv(elements.view.range.location, uniforms.view.range);
+    gl.uniform1f(elements.scaleDisp.location, uniforms.scaleDisp);
+    gl.uniform1f(elements.maxStress.location, uniforms.maxStress);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, elements.position.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, elements.position.data);
+    gl.bindBuffer(gl.ARRAY_BUFFER, elements.displacement.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, elements.displacement.data);
+    gl.bindBuffer(gl.ARRAY_BUFFER, elements.stress.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, elements.stress.data);
+    
+    gl.drawArrays(gl.TRIANGLES, 0, 3 * model.elements_len()); //elements
+    
+    gl.disableVertexAttribArray(elements.displacement.location);
+    gl.disableVertexAttribArray(elements.position.location);
+    gl.disableVertexAttribArray(elements.stress.location);
+    
+    gl.useProgram(nodes.program);
+    
+    gl.enableVertexAttribArray(nodes.position.location); // Enables the attribute
+    gl.enableVertexAttribArray(nodes.displacement.location); // Enables the attribute
+    
+    gl.uniform2fv(nodes.view.center.location, uniforms.view.center);
+    gl.uniform2fv(nodes.view.range.location, uniforms.view.range);
+    gl.uniform1f(nodes.scaleDisp.location, uniforms.scaleDisp);
+    
+    gl.bindBuffer(gl.ARRAY_BUFFER, nodes.position.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, nodes.position.data);
+    gl.bindBuffer(gl.ARRAY_BUFFER, nodes.displacement.buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, nodes.displacement.data);
+    
+    gl.drawArrays(gl.POINTS, 0, wasm.get_nodes_len()) // nodes
+    
+    gl.disableVertexAttribArray(nodes.position.location); // Disable the attribute
+    gl.disableVertexAttribArray(nodes.displacement.location); // Disable the attribute
   }
 
-  // Set shader source code
-  gl.shaderSource(displacementVertexShader, await displacementVertexShaderSource);
-  gl.shaderSource(stressFragmentShader, await stressFragmentShaderSource);
+  canvas.addEventListener("mousemove", (evt) => {
+    if (!evt.buttons || evt.buttons != 1) return;
+    uniforms.view.center[0] -= evt.movementX * uniforms.view.range[0] / canvas.clientWidth;
+    uniforms.view.center[1] += evt.movementY * uniforms.view.range[1] / canvas.clientHeight;
+    renderAll();
+  });
 
-  // Compiler shader source code
-  gl.compileShader(displacementVertexShader);
-  gl.compileShader(stressFragmentShader);
-
-  // Check for compilation errors
-  if (!gl.getShaderParameter(displacementVertexShader, gl.COMPILE_STATUS)){
-    error(`ERROR compiling displacement vertex shader!\n${gl.getShaderInfoLog(displacementVertexShader)}`);
-    throw null;
-  }
-  if (!gl.getShaderParameter(stressFragmentShader, gl.COMPILE_STATUS)){
-    error(`ERROR compiling stress fragment shader!\n${gl.getShaderInfoLog(stressFragmentShader)}`);
-    throw null;
-  }
-
-  // Create and link the program to run the shaders
-  var stressProgram = gl.createProgram();
-  gl.attachShader(stressProgram, displacementVertexShader);
-  gl.attachShader(stressProgram, stressFragmentShader);
-  gl.linkProgram(stressProgram);
-
-  // Check for linking and validation errors
-  if (!gl.getProgramParameter(stressProgram, gl.LINK_STATUS)){
-    error(`ERROR linking program\n${gl.getProgramInfoLog(stressProgram)}`);
-    throw null;
-  }
-  gl.validateProgram(stressProgram);
-  if (!gl.getProgramParameter(stressProgram, gl.VALIDATE_STATUS)){
-    alert(`ERROR validating program\n${gl.getProgramInfoLog(stressProgram)}`);
-    throw null;
-  }
-
-  const maxFaces = wasm.max_faces();
-  const vertices = 
-    new Float32Array(
-      wasm.memory.buffer, 
-      wasm.get_vertices(), 
-      3 * 2 * maxFaces
-    );
-  const displacements = 
-    new Float32Array(
-      wasm.memory.buffer, 
-      wasm.get_displacements(), 
-      3 * 2 * maxFaces
-    );
-  const stresses = 
-    new Float32Array(
-      wasm.memory.buffer, 
-      wasm.get_stresses(), 
-      3 * 3 * maxFaces
-    );
-  
-  // Create buffers
-  // vertex position buffer
-  const vertexBufferObject = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBufferObject);
-  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
-  const positionAttribLocation = gl.getAttribLocation(stressProgram, "vertPosition"); 
-  gl.vertexAttribPointer(
-    positionAttribLocation, // Attribute location 
-    2,                      // Number of elements per attribute (X, Y)
-    gl.FLOAT,               // Data type of the elements
-    false,                  // Whether the elements are normalized
-    2 * Float32Array.BYTES_PER_ELEMENT, // Size of an individual vertex
-    0  // Offset from the beginning of a single vertex to this attribute
-  );
-  // vertex displacement buffer
-  const displacementBufferObject = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, displacementBufferObject);
-  gl.bufferData(gl.ARRAY_BUFFER, displacements, gl.DYNAMIC_DRAW);
-  const displacementAttribLocation = gl.getAttribLocation(stressProgram, "vertDisp");
-  gl.vertexAttribPointer(
-    displacementAttribLocation, // Attribute location 
-    2,                       // Number of elements per attribute (X, Y)
-    gl.FLOAT,                // Data type of the elements
-    false,                   // Whether the elements are normalized
-    2 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
-    0  // Offset from the beginning of a single vertex to this attribute
-  );
-  // vertex stress buffer
-  const stressBufferObject = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, stressBufferObject);
-  gl.bufferData(gl.ARRAY_BUFFER, stresses, gl.DYNAMIC_DRAW);
-  const stressAttribLocation = gl.getAttribLocation(stressProgram, "vertStress");
-  gl.vertexAttribPointer(
-    stressAttribLocation, // Attribute location 
-    3,                    // Number of elements per attribute (σ_x, σ_y, τ_xy)
-    gl.FLOAT,             // Data type of the elements
-    false,                // Whether the elements are normalized
-    3 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
-    0  // Offset from the beginning of a single vertex to this attribute
-  );
-
-  gl.enableVertexAttribArray(displacementAttribLocation); // Enables the attribute
-  gl.enableVertexAttribArray(positionAttribLocation); // Enables the attribute
-  gl.enableVertexAttribArray(stressAttribLocation); // Enables the attribute
-
-  gl.useProgram(stressProgram);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  canvas.addEventListener("wheel", (evt) => {
+    const zoom = 1.1;
+    const unzoom = 0.9;
+    const rect = canvas.getBoundingClientRect();
+    let dx = ((evt.clientX - rect.left) / canvas.clientWidth - 0.5) * uniforms.view.range[0];
+    let dy = (0.5 - (evt.clientY - rect.top) / canvas.clientHeight) * uniforms.view.range[1];
+    const scale = (evt.deltaY < 0) ? zoom : unzoom;
+    uniforms.view.range[0] *= scale;
+    uniforms.view.range[1] *= scale;
+    uniforms.view.center[0] += dx * (1 - scale);
+    uniforms.view.center[1] += dy * (1 - scale);
+    renderAll();
+  });
 
   const canvasHooks = {
-    buffer: {
-      object: {
-        vertex: vertexBufferObject, 
-        displacement: displacementBufferObject, 
-        stress: stressBufferObject
-      },
-      data: {
-        vertex: vertices,
-        displacement: displacements,
-        stress: stresses,
-      }
-    },
     canvas,
     context: gl,
-    programs: {stress: stressProgram},
+    renderAll,
+    renderNodes,
   }
 
+  console.log("canvas setup complete!");
   return canvasHooks;
 }
 
@@ -491,7 +512,184 @@ if (document.readyState === "loading") {
   setup();
 }
 
-function setupFileManagement() {
+/**
+ * @param {WebGL2RenderingContext | WebGLRenderingContext} gl
+ */
+async function setupElementProgram(gl) {
+
+  // Get shader source code from files
+  const displacementVertexShaderSource = load.text("shaders/displacement.vs.glsl");
+  const stressFragmentShaderSource = load.text("shaders/stress.fs.glsl");
+
+  const program = load.shaderProgram(
+    gl, 
+    await displacementVertexShaderSource, 
+    await stressFragmentShaderSource
+  );
+
+  gl.useProgram(program);
+
+  const maxFaces = wasm.max_faces();
+  const elements = {
+    program,
+    view: {
+      center: {
+        location: gl.getUniformLocation(program, "view.center")
+      },
+      range: {
+        location: gl.getUniformLocation(program, "view.range")
+      }
+    },
+    scaleDisp: {
+      location: gl.getUniformLocation(program, "scaleDisp")
+    },
+    maxStress: {
+      location: gl.getUniformLocation(program, "maxStress")
+    },
+    position: {
+      buffer: gl.createBuffer(),
+      data: new Float32Array(
+        wasm.memory.buffer, 
+        wasm.get_element_positions(), 
+        2 * maxFaces
+      ),
+      location: gl.getAttribLocation(program, "vertPosition"),
+    },
+    displacement: {
+      buffer: gl.createBuffer(),
+      data: new Float32Array(
+        wasm.memory.buffer, 
+        wasm.get_element_displacements(), 
+        2 * maxFaces
+      ),
+      location: gl.getAttribLocation(program, "vertDisp"),
+    },
+    stress: {
+      buffer: gl.createBuffer(),
+      data: new Float32Array(
+        wasm.memory.buffer, 
+        wasm.get_element_stresses(), 
+        3 * maxFaces
+      ),
+      location: gl.getAttribLocation(program, "vertStress"),
+    },
+  }
+
+  // Create buffers
+  // vertex position buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, elements.position.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, elements.position.data, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(
+    elements.position.location, // Attribute location 
+    2,                      // Number of elements per attribute (X, Y)
+    gl.FLOAT,               // Data type of the elements
+    false,                  // Whether the elements are normalized
+    2 * Float32Array.BYTES_PER_ELEMENT, // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+  // vertex displacement buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, elements.displacement.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, elements.displacement.data, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(
+    elements.displacement.location, // Attribute location 
+    2,                       // Number of elements per attribute (X, Y)
+    gl.FLOAT,                // Data type of the elements
+    false,                   // Whether the elements are normalized
+    2 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+  // vertex stress buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, elements.stress.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, elements.stress.data, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(
+    elements.stress.location, // Attribute location 
+    3,                    // Number of elements per attribute (σ_x, σ_y, τ_xy)
+    gl.FLOAT,             // Data type of the elements
+    false,                // Whether the elements are normalized
+    3 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+
+  return elements;
+}
+
+/**
+ * @param {WebGL2RenderingContext | WebGLRenderingContext} gl
+ */
+async function setupNodeProgram(gl) {
+
+  // Get shader source code from files
+  const vertexShaderSource = load.text("shaders/nodes.vs.glsl");
+  const fragmentShaderSource = load.text("shaders/nodes.fs.glsl");
+
+  const program = load.shaderProgram(
+    gl, 
+    await vertexShaderSource, 
+    await fragmentShaderSource
+  );
+
+  gl.useProgram(program);
+
+  const maxVerts= wasm.max_vertices();
+  const nodes = {
+    program,
+    view: {
+      center: {
+        location: gl.getUniformLocation(program, "view.center")
+      },
+      range: {
+        location: gl.getUniformLocation(program, "view.range")
+      }
+    },
+    scaleDisp: {
+      location: gl.getUniformLocation(program, "scaleDisp")
+    },
+    position: {
+      buffer: gl.createBuffer(),
+      data: new Float32Array(
+        wasm.memory.buffer, 
+        wasm.get_node_positions(), 
+        2 * maxVerts
+      ),
+      location: gl.getAttribLocation(program, "vertPosition"),
+    },
+    displacement: {
+      buffer: gl.createBuffer(),
+      data: new Float32Array(
+        wasm.memory.buffer, 
+        wasm.get_node_displacements(), 
+        2 * maxVerts
+      ),
+      location: gl.getAttribLocation(program, "vertDisp"),
+    },
+  };
+  gl.bindBuffer(gl.ARRAY_BUFFER, nodes.position.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, nodes.position.data, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(
+    nodes.position.location, // Attribute location 
+    2,                    // Number of elements per attribute (σ_x, σ_y, τ_xy)
+    gl.FLOAT,             // Data type of the elements
+    false,                // Whether the elements are normalized
+    2 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+  gl.bindBuffer(gl.ARRAY_BUFFER, nodes.displacement.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, nodes.displacement.data, gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(
+    nodes.displacement.location, // Attribute location 
+    2,                    // Number of elements per attribute (σ_x, σ_y, τ_xy)
+    gl.FLOAT,             // Data type of the elements
+    false,                // Whether the elements are normalized
+    2 * Float32Array.BYTES_PER_ELEMENT,  // Size of an individual vertex
+    0  // Offset from the beginning of a single vertex to this attribute
+  );
+  return nodes;
+}
+
+/**
+ * @param {() => void} renderAll
+ */
+function setupFileManagement(renderAll) {
 
   const newBtn = doc.getElementById("new");
   const open = doc.getElementById("open");
@@ -512,6 +710,7 @@ function setupFileManagement() {
 
     nodeIndex.dispatchEvent(new Event("change"));
     elementIndex.dispatchEvent(new Event("change"));
+    renderAll();
   });
 
   open.addEventListener("click", (_evt) => {
@@ -547,7 +746,7 @@ function setupFileManagement() {
         alert(message);
         throw new Error(message)
       }
-      doc.getInputElementById("rigidity").dispatchEvent(new Event("change"));
+      doc.getElementById("new").dispatchEvent(new Event("click"));
       if (modelJson.nodes) {
         const nodeCount = modelJson.nodes.length;
         for (let i = 0; i < nodeCount; i++) {
@@ -583,6 +782,7 @@ function setupFileManagement() {
         alert(message);
         throw new Error(message)
       }
+      renderAll();
     });
     input.click();
   });

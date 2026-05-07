@@ -1,6 +1,6 @@
 pub mod test;
 
-use crate::fea_output::{self, *};
+use crate::fea_output;
 use crate::math::{stack::Matrix, *};
 use std::{cell::RefCell, fmt, rc::Rc, vec};
 use wasm_bindgen::prelude::*;
@@ -194,38 +194,60 @@ impl Lin2DStaticModel {
             Err(FeaError { errors }.into())
         }
     }
-    pub fn set_to_output(&self) {
+    pub fn set_all_outputs(&self) {
+        use fea_output::*;
+        let mut outputs = OUTPUTS.lock().unwrap();
         for (i, element) in self.elements.iter().enumerate() {
             for (j, node) in element.nodes().iter().enumerate() {
-                use fea_output::*;
                 let i_x = 2 * (3 * i + j);
                 let i_y = i_x + 1;
-                unsafe {
-                    VERTICES[i_x] = node.position.x() as f32;
-                    VERTICES[i_y] = node.position.y() as f32;
-                    DISPLACEMENTS[i_x] = node.displacement.x() as f32;
-                    DISPLACEMENTS[i_y] = node.displacement.y() as f32;
-                    FORCES[i_x] = node.force.x() as f32;
-                    FORCES[i_y] = node.force.y() as f32;
-                }
+                outputs.elements.positions[i_x] = node.position.x() as f32;
+                outputs.elements.positions[i_y] = node.position.y() as f32;
+                outputs.elements.displacements[i_x] = node.displacement.x() as f32;
+                outputs.elements.displacements[i_y] = node.displacement.y() as f32;
                 let i_x = 3 * (3 * i + j);
                 let i_y = i_x + 1;
                 let i_xy = i_y + 1;
                 let stress = element.get_stress(self.elasticity);
-                unsafe {
-                    STRESSES[i_x] = stress[0] as f32;
-                    STRESSES[i_y] = stress[1] as f32;
-                    STRESSES[i_xy] = stress[2] as f32;
-                }
+                outputs.elements.stresses[i_x] = stress[0] as f32;
+                outputs.elements.stresses[i_y] = stress[1] as f32;
+                outputs.elements.stresses[i_xy] = stress[2] as f32;
             }
-        } 
+        }
+        let nodes = self.nodes.borrow();
+        for (i, node) in nodes.iter().enumerate() {
+            let i_x = 2 * i;
+            let i_y = i_x + 1;
+            outputs.nodes.positions[i_x] = node.position.x() as f32;
+            outputs.nodes.positions[i_y] = node.position.y() as f32;
+            outputs.nodes.displacements[i_x] = node.displacement.x() as f32;
+            outputs.nodes.displacements[i_y] = node.displacement.y() as f32;
+        }
+    }
+    pub fn set_all_nodes(&self) {
+        use fea_output::*;
+        let mut outputs = OUTPUTS.lock().unwrap();
+        let nodes = self.nodes.borrow();
+        for (i, node) in nodes.iter().enumerate() {
+            let i_x = 2 * i;
+            let i_y = i_x + 1;
+            outputs.nodes.positions[i_x] = node.position.x() as f32;
+            outputs.nodes.positions[i_y] = node.position.y() as f32;
+            outputs.nodes.displacements[i_x] = node.displacement.x() as f32;
+            outputs.nodes.displacements[i_y] = node.displacement.y() as f32;
+        }
+        outputs.nodes.len = self.nodes_len();
     }
 }
 
 #[allow(non_snake_case)]
 pub fn plane_stress_matrix(E: f64, nu: f64, G: f64) -> stack::Matrix<3, 3> {
     let Ep = E / (1.0 - nu * nu);
-    let values = [[Ep, Ep * nu, 0.0], [Ep * nu, Ep, 0.0], [0.0, 0.0, G]];
+    let values = [
+        [Ep, Ep * nu, 0.0], 
+        [Ep * nu, Ep, 0.0], 
+        [0.0, 0.0, G]
+    ];
     stack::Matrix::new(values)
 }
 
@@ -288,9 +310,10 @@ type Point2D = stack::Vector<2>;
 
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy)]
+#[repr(u8)]
 pub enum KnownType {
-    Force,
-    Displacement,
+    Force = 0,
+    Displacement = 1,
 }
 
 #[wasm_bindgen]

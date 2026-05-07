@@ -50,7 +50,7 @@ la-tex {
 :root {
   --sidebar-width: 300px;
 }
-cavas {
+canvas {
   background-color: #f88;
 }
 div.main {
@@ -69,6 +69,7 @@ div.sidebar{
   padding-top:  0.5em;
 }
 div.main-content{
+  position: relative;
   float: left;
   width: calc(100vw - var(--sidebar-width));
   height: inherit;
